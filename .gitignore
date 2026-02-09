@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+stats_page_debug.txt
+claude_session.txt
+*.pyc
+nul
+.claude/
