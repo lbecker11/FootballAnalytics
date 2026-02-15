@@ -1,0 +1,34 @@
+CREATE TABLE features AS
+WITH points AS (
+  SELECT ms.match_id, ms.team_id, ms.scored, ms.conceded, ms.xgoals,
+    ms.possession, ms.shots, ms.ontarget, ms.accuracy, ms.win,
+    m.season_id, m.matchday,
+    SUM(CASE WHEN ms.scored > ms.conceded THEN 3
+      WHEN ms.scored = ms.conceded THEN 1 ELSE 0 END)
+      OVER(PARTITION BY ms.team_id, m.season_id
+          ORDER BY m.matchday) as cumulative_points
+  FROM match_stats ms
+  JOIN matches m ON ms.match_id = m.match_id
+),
+streak_groups AS (
+  SELECT p.*,
+    SUM(CASE WHEN p.win = false THEN 1 ELSE 0 END)
+      OVER (PARTITION BY p.team_id, p.season_id ORDER BY p.matchday) as grp
+  FROM points p
+)
+
+SELECT s.match_id, s.team_id,
+  AVG(s.scored) OVER (PARTITION BY s.team_id, s.season_id ORDER BY s.matchday ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) as rolling_avg_goals,
+  LAG(s.xgoals) OVER (PARTITION BY s.team_id, s.season_id ORDER BY s.matchday) as prev_xgoals,
+  LAG(s.possession) OVER (PARTITION BY s.team_id, s.season_id ORDER BY s.matchday) as prev_possession,
+  LAG(s.shots) OVER (PARTITION BY s.team_id, s.season_id ORDER BY s.matchday) as prev_shots,
+  LAG(s.ontarget) OVER (PARTITION BY s.team_id, s.season_id ORDER BY s.matchday) as prev_ontarget,
+  LAG(s.accuracy) OVER (PARTITION BY s.team_id, s.season_id ORDER BY s.matchday) as prev_accuracy,
+  s.cumulative_points,
+  RANK() OVER (PARTITION BY s.season_id, s.matchday ORDER BY s.cumulative_points DESC) as points_rank,
+  SUM(s.scored - s.conceded) OVER (PARTITION BY s.team_id, s.season_id ORDER BY s.matchday) as goal_difference,
+  CASE WHEN s.win = true
+    THEN ROW_NUMBER() OVER (PARTITION BY s.team_id, s.season_id, s.grp ORDER BY s.matchday)
+    ELSE 0
+  END as win_streak
+FROM streak_groups s;
