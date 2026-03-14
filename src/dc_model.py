@@ -5,7 +5,7 @@ from scipy.stats import poisson
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 
-df = pd.read_csv('bundesliga_features.csv', sep=',')
+df = pd.read_csv('../data/bundesliga_features.csv', sep=',')
 train = df[df['season_name'] != '2025-2026']
 test = df[df['season_name'] == '2025-2026']
 
@@ -97,8 +97,8 @@ def neg_log_likelihood(params, data):
 # print(f'Rho (correction): {rho_fit:.4f}')
 
 # Load parameters
-params = np.load('dc_params.npy')
-teams = np.load('dc_teams.npy', allow_pickle=True).tolist()
+params = np.load('../models/dc_params.npy')
+teams = np.load('../models/dc_teams.npy', allow_pickle=True).tolist()
 team_idx = {team: i for i, team in enumerate(teams)}
 alphas_fit = params[:len(teams)]
 betas_fit = params[len(teams):2*len(teams)]
@@ -158,10 +158,42 @@ for _, row in home_test.iterrows():
     predictions.append(pred)
 
 predictions_df = pd.DataFrame(predictions)
-predictions_df.to_csv('dc_predictions.csv', sep=';', index=False)
+predictions_df.to_csv('../data/dc_predictions.csv', sep=';', index=False)
 print(predictions_df[['home_team', 'away_team', 'home_win', 'draw', 'away_win',
                        'pred_home_score', 'pred_away_score',
                        'actual_home_score', 'actual_away_score']].head(10))
+
+def generate_dc_features(df):
+    # Build one row per match for full dataset
+    home_all = df[df['team_id'] == df['home_team_id']].copy()
+    home_all['home_team_name'] = home_all['team_name']
+    home_all = home_all.merge(
+        df[df['team_id'] == df['away_team_id']][['match_id', 'team_name']],
+        on='match_id', suffixes=('', '_away')
+    )
+    home_all = home_all.rename(columns={'team_name_away': 'away_team_name'})
+
+    records = []
+    for _, row in home_all.iterrows():
+        if row['home_team_name'] not in team_idx or row['away_team_name'] not in team_idx:
+            continue
+        pred = predict_match(row['home_team_name'], row['away_team_name'])
+        records.append({
+            'match_id': row['match_id'],
+            'dc_lambda': pred['lambda'],
+            'dc_mu': pred['mu'],
+            'dc_home_win': pred['home_win'],
+            'dc_draw': pred['draw'],
+            'dc_away_win': pred['away_win']
+        })
+
+    dc_features = pd.DataFrame(records)
+
+    # Merge back onto full df — each match gets dc features for both home and away rows
+    df = df.merge(dc_features, on='match_id', how='left')
+    df.to_csv('../data/bundesliga_features.csv', index=False)
+    print(f'DC features added — {len(dc_features)} matches processed')
+    return df
 
 def get_outcome(home_score, away_score):
     if home_score > away_score:
@@ -182,3 +214,5 @@ disp = ConfusionMatrixDisplay(cm, display_labels=labels)
 disp.plot()
 plt.tight_layout()
 plt.show()
+
+generate_dc_features(df)

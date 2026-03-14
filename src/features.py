@@ -16,7 +16,7 @@ conn = psycopg2.connect(
 )
 
 def rebuild_features_table():
-    with open('feature_query.txt', 'r') as f:
+    with open('../sql/feature_query.txt', 'r') as f:
         sql = f.read()
     cur = conn.cursor()
     cur.execute("DROP TABLE IF EXISTS features;")
@@ -196,7 +196,7 @@ def build_features():
     result = result.drop(columns=['home_team_id_elo', 'away_team_id_elo',
                                    'home_elo_before', 'away_elo_before'])
 
-    result.to_csv('bundesliga_features.csv', index=False)
+    result.to_csv('../data/bundesliga_features.csv', index=False)
     print(f'Exported to bundesliga_features.csv — {len(result)} rows, {len(result.columns)} columns')
 
     return result
