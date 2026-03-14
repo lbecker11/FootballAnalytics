@@ -15,6 +15,18 @@ conn = psycopg2.connect(
     port="5432"
 )
 
+def rebuild_features_table():
+    with open('feature_query.txt', 'r') as f:
+        sql = f.read()
+    cur = conn.cursor()
+    cur.execute("DROP TABLE IF EXISTS features;")
+    cur.execute(sql)
+    conn.commit()
+    cur.close()
+    print("Features table rebuilt successfully")
+
+rebuild_features_table()
+
 query = """
     SELECT ms.match_id, ms.team_id, ms.scored, ms.conceded, ms.xgoals, ms.passes,
     ms.accuracy, ms.shots, ms.ontarget, ms.offtarget, ms.possession, ms.tackleswon,
@@ -143,15 +155,19 @@ def calculate_home_away_form(df):
 
 def calculate_xg_performance(df):
     df = df.sort_values(['season_name', 'matchday']).copy()
-    df['xg_performance'] = df['scored'] - df['xgoals']
-    df['rolling_xg_performance'] = (df.groupby('team_id')['xg_performance']
+    xg_performance = df['scored'] - df['xgoals']
+    df['rolling_xg_performance'] = (df.groupby('team_id')[df.columns[0]]
+                                    .transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean()))
+    df['rolling_xg_performance'] = (df.assign(xg_performance=xg_performance)
+                                    .groupby('team_id')['xg_performance']
                                     .transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean()))
     return df
 
 def calculate_shot_conversion(df):
     df = df.sort_values(['season_name', 'matchday']).copy()
-    df['shot_conversion'] = df['scored'] / df['shots'].replace(0, float('nan'))
-    df['rolling_shot_conversion'] = (df.groupby('team_id')['shot_conversion']
+    shot_conversion = df['scored'] / df['shots'].replace(0, float('nan'))
+    df['rolling_shot_conversion'] = (df.assign(shot_conversion=shot_conversion)
+                                     .groupby('team_id')['shot_conversion']
                                      .transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean()))
     return df
 
@@ -184,5 +200,9 @@ def build_features():
     print(f'Exported to bundesliga_features.csv — {len(result)} rows, {len(result.columns)} columns')
 
     return result
+
+
+if __name__ == '__main__':
+    build_features()
 
 

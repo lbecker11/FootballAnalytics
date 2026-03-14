@@ -6,29 +6,41 @@ WITH points AS (
     SUM(CASE WHEN ms.scored > ms.conceded THEN 3
       WHEN ms.scored = ms.conceded THEN 1 ELSE 0 END)
       OVER(PARTITION BY ms.team_id, m.season_id
-          ORDER BY m.matchday) as cumulative_points
+          ORDER BY m.matchday) as cumulative_points_incl
   FROM match_stats ms
   JOIN matches m ON ms.match_id = m.match_id
+),
+lagged_points AS (
+  SELECT p.*,
+    LAG(p.cumulative_points_incl) OVER (PARTITION BY p.team_id, p.season_id ORDER BY p.matchday) as cumulative_points
+  FROM points p
 ),
 streak_groups AS (
   SELECT p.*,
     SUM(CASE WHEN p.win = false THEN 1 ELSE 0 END)
-      OVER (PARTITION BY p.team_id, p.season_id ORDER BY p.matchday) as grp
-  FROM points p
+      OVER (PARTITION BY p.team_id, p.season_id ORDER BY p.matchday
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) as grp
+  FROM lagged_points p
+),
+win_streaks AS (
+  SELECT s.*,
+    CASE WHEN s.win = true
+      THEN ROW_NUMBER() OVER (PARTITION BY s.team_id, s.season_id, s.grp ORDER BY s.matchday)
+      ELSE 0
+    END as win_streak_incl
+  FROM streak_groups s
 )
 
-SELECT s.match_id, s.team_id,
-  AVG(s.scored) OVER (PARTITION BY s.team_id, s.season_id ORDER BY s.matchday ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) as rolling_avg_goals,
-  LAG(s.xgoals) OVER (PARTITION BY s.team_id, s.season_id ORDER BY s.matchday) as prev_xgoals,
-  LAG(s.possession) OVER (PARTITION BY s.team_id, s.season_id ORDER BY s.matchday) as prev_possession,
-  LAG(s.shots) OVER (PARTITION BY s.team_id, s.season_id ORDER BY s.matchday) as prev_shots,
-  LAG(s.ontarget) OVER (PARTITION BY s.team_id, s.season_id ORDER BY s.matchday) as prev_ontarget,
-  LAG(s.accuracy) OVER (PARTITION BY s.team_id, s.season_id ORDER BY s.matchday) as prev_accuracy,
-  s.cumulative_points,
-  RANK() OVER (PARTITION BY s.season_id, s.matchday ORDER BY s.cumulative_points DESC) as points_rank,
-  SUM(s.scored - s.conceded) OVER (PARTITION BY s.team_id, s.season_id ORDER BY s.matchday) as goal_difference,
-  CASE WHEN s.win = true
-    THEN ROW_NUMBER() OVER (PARTITION BY s.team_id, s.season_id, s.grp ORDER BY s.matchday)
-    ELSE 0
-  END as win_streak
-FROM streak_groups s;
+SELECT w.match_id, w.team_id,
+  AVG(w.scored) OVER (PARTITION BY w.team_id, w.season_id ORDER BY w.matchday ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING) as rolling_avg_goals,
+  LAG(w.xgoals) OVER (PARTITION BY w.team_id, w.season_id ORDER BY w.matchday) as prev_xgoals,
+  LAG(w.possession) OVER (PARTITION BY w.team_id, w.season_id ORDER BY w.matchday) as prev_possession,
+  LAG(w.shots) OVER (PARTITION BY w.team_id, w.season_id ORDER BY w.matchday) as prev_shots,
+  LAG(w.ontarget) OVER (PARTITION BY w.team_id, w.season_id ORDER BY w.matchday) as prev_ontarget,
+  LAG(w.accuracy) OVER (PARTITION BY w.team_id, w.season_id ORDER BY w.matchday) as prev_accuracy,
+  w.cumulative_points,
+  RANK() OVER (PARTITION BY w.season_id, w.matchday ORDER BY w.cumulative_points DESC) as points_rank,
+  SUM(w.scored - w.conceded) OVER (PARTITION BY w.team_id, w.season_id ORDER BY w.matchday
+      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) as goal_difference,
+  LAG(w.win_streak_incl) OVER (PARTITION BY w.team_id, w.season_id ORDER BY w.matchday) as win_streak
+FROM win_streaks w;
