@@ -391,15 +391,113 @@ def simulate_bankroll_dc(df, starting_bankroll=10000):
     return history_df
 
 
-if __name__ == '__main__':
-    predictions_df, le = rolling_train(df, seasons, BEST_PARAMS)
-    eval_rolling(predictions_df, le)
-    predictions_df = add_dc_probabilities(predictions_df, df_dc)
-    predictions_df = merge_odds(predictions_df, df_odds, df)
-    predictions_df = predictions_df.pipe(calc_implied_prob).pipe(calc_edge).pipe(calc_ev).pipe(flag_bets).pipe(calc_kelly)
-    print(f'Total EV positive bets: {len(predictions_df[predictions_df["bet_flag"] == 1])}')
-    bankroll_df = simulate_bankroll(predictions_df)
+MODELS = [
+    ('XGBoost Classifier', 'pred_home_win',  'pred_draw',  'pred_away_win'),
+    ('Dixon-Coles',        'dc_home_win',    'dc_draw',    'dc_away_win'),
+    ('XGBoost xG',         'xgb_home_win',   'xgb_draw',   'xgb_away_win'),
+    ('Bivariate Poisson',  'bp_home_win',    'bp_draw',    'bp_away_win'),
+    ('Stacking',           'stack_home_win', 'stack_draw', 'stack_away_win'),
+]
 
-    predictions_df = predictions_df.pipe(calc_edge_dc).pipe(calc_ev_dc).pipe(flag_bets_dc).pipe(calc_kelly_dc)
-    print(f'Total DC EV positive bets: {len(predictions_df[predictions_df["dc_bet_flag"] == 1])}')
-    bankroll_dc_df = simulate_bankroll_dc(predictions_df)
+
+def run_backtest(df, model_name, home_col, draw_col, away_col,
+                 ev_threshold=0.20, fraction=0.25, max_bet=0.10,
+                 starting_bankroll=10000):
+    df = df.copy()
+
+    # EV for home and away only (draw betting excluded — hard to identify value)
+    df['_ev_h'] = df[home_col] * (df['PSH'] - 1) - (1 - df[home_col])
+    df['_ev_a'] = df[away_col] * (df['PSA'] - 1) - (1 - df[away_col])
+
+    valid_home = df['_ev_h'] > ev_threshold
+    valid_away = (df['_ev_a'] > ev_threshold) & (df['PSA'] <= 10)
+    df['_bet_flag'] = (valid_home | valid_away).astype(int)
+    df['_bet_outcome'] = None
+    df.loc[valid_home, '_bet_outcome'] = 'home_win'
+    df.loc[valid_away, '_bet_outcome'] = 'away_win'
+
+    # Fractional Kelly stake sizing
+    b_h = df['PSH'] - 1
+    df['_kelly_h'] = (fraction * ((b_h * df[home_col] - (1 - df[home_col])) / b_h)).clip(0, max_bet)
+    b_a = df['PSA'] - 1
+    df['_kelly_a'] = (fraction * ((b_a * df[away_col] - (1 - df[away_col])) / b_a)).clip(0, max_bet)
+
+    bets = df[df['_bet_flag'] == 1].sort_values(['season_name', 'matchday']).reset_index(drop=True)
+
+    bankroll = starting_bankroll
+    history = [bankroll]
+    records = []
+
+    for _, row in bets.iterrows():
+        outcome = row['_bet_outcome']
+        if outcome == 'home_win':
+            stake = bankroll * row['_kelly_h']
+            won = row['actual_outcome'] == 'home_win'
+            odds = row['PSH']
+            ev = row['_ev_h']
+        else:
+            stake = bankroll * row['_kelly_a']
+            won = row['actual_outcome'] == 'away_win'
+            odds = row['PSA']
+            ev = row['_ev_a']
+
+        profit = stake * (odds - 1) if won else -stake
+        bankroll += profit
+        history.append(bankroll)
+        records.append({
+            'season_name': row['season_name'],
+            'matchday': row['matchday'],
+            'home_team': row.get('home_team', ''),
+            'away_team': row.get('away_team', ''),
+            'actual_outcome': row['actual_outcome'],
+            'bet_outcome': outcome,
+            'odds': odds,
+            'ev': ev,
+            'stake': stake,
+            'won': won,
+            'profit': profit,
+            'bankroll': bankroll,
+        })
+
+    ret = (bankroll - starting_bankroll) / starting_bankroll * 100
+    print(f'{model_name:22s}: {len(bets):3d} bets | final €{bankroll:,.2f} | return {ret:+.1f}%')
+    return pd.Series(history, name=model_name), pd.DataFrame(records)
+
+
+def plot_comparison(histories, starting_bankroll=10000):
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+    plt.figure(figsize=(14, 6))
+    for (name, *_), color in zip(MODELS, colors):
+        s = histories[name][0]  # index 0 = bankroll Series
+        plt.plot(range(len(s)), s.values, label=name, color=color)
+    plt.axhline(starting_bankroll, color='grey', linestyle='--', label='Starting bankroll')
+    plt.title('Bankroll Development — All Models')
+    plt.xlabel('Bet number')
+    plt.ylabel('Bankroll (€)')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(VIS_DIR, 'bankroll_comparison.png'))
+    plt.close()
+    print('Saved bankroll_comparison.png')
+
+
+if __name__ == '__main__':
+    all_preds = pd.read_csv(os.path.join(DATA_DIR, 'all_predictions.csv'), sep=';')
+
+    # Drop rows where odds are missing (relegated/promoted teams with no odds data)
+    all_preds = all_preds.dropna(subset=['PSH', 'PSD', 'PSA']).copy()
+
+    # Vig removal — fair implied probabilities from Pinnacle
+    total = (1 / all_preds['PSH']) + (1 / all_preds['PSD']) + (1 / all_preds['PSA'])
+    all_preds['fair_h'] = (1 / all_preds['PSH']) / total
+    all_preds['fair_d'] = (1 / all_preds['PSD']) / total
+    all_preds['fair_a'] = (1 / all_preds['PSA']) / total
+
+    print(f'Loaded {len(all_preds)} matched matches\n')
+
+    results = {}
+    for name, h_col, d_col, a_col in MODELS:
+        sub = all_preds.dropna(subset=[h_col, d_col, a_col])
+        results[name] = run_backtest(sub, name, h_col, d_col, a_col)
+
+    plot_comparison(results)

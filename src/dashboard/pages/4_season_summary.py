@@ -1,86 +1,44 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import numpy as np
 
 st.set_page_config(page_title='Season Summary', layout='wide')
 st.title('Season Summary')
-st.markdown('Financial KPIs, betting statistics, bet breakdown and risk metrics per season.')
+st.markdown('Financial KPIs, betting statistics and risk metrics per season.')
 
-if 'predictions_df' not in st.session_state:
+if 'records' not in st.session_state:
     st.warning('Please navigate to the home page first to load the data.')
     st.stop()
 
-predictions_df = st.session_state['predictions_df']
-bankroll_df = st.session_state['bankroll_df']
-bankroll_dc_df = st.session_state['bankroll_dc_df']
+records = st.session_state['records']
 
 STARTING_BANKROLL = 10000
 
-model = st.selectbox('Model', ['XGBoost', 'Dixon-Coles'])
+model = st.selectbox('Model', list(records.keys()))
 
-if model == 'XGBoost':
-    bets = predictions_df[predictions_df['bet_flag'] == 1].copy()
-    bets = bets[bets['team_id'] == bets['home_team_id']].copy()
-    bet_outcome_col = 'bet_outcome'
-    kelly_h_col = 'kelly_h'
-    kelly_a_col = 'kelly_a'
-else:
-    bets = predictions_df[predictions_df['dc_bet_flag'] == 1].copy()
-    bets = bets[bets['team_id'] == bets['home_team_id']].copy()
-    bet_outcome_col = 'dc_bet_outcome'
-    kelly_h_col = 'dc_kelly_h'
-    kelly_a_col = 'dc_kelly_a'
+bets = records[model].copy()
+if bets.empty:
+    st.warning(f'No bets flagged for {model}.')
+    st.stop()
 
 bets = bets.sort_values(['season_name', 'matchday']).reset_index(drop=True)
 
-# Reconstruct per-bet results with running bankroll
-bankroll = STARTING_BANKROLL
-records = []
-
-for _, row in bets.iterrows():
-    outcome = row[bet_outcome_col]
-    if outcome == 'home_win':
-        stake = bankroll * row[kelly_h_col]
-        odds = row['PSH']
-        won = row['outcome'] == 'home_win'
-    else:
-        stake = bankroll * row[kelly_a_col]
-        odds = row['PSA']
-        won = row['outcome'] == 'away_win'
-
-    profit = stake * (odds - 1) if won else -stake
-    bankroll += profit
-
-    records.append({
-        'season': row['season_name'],
-        'bet': outcome,
-        'stake': stake,
-        'odds': odds,
-        'won': won,
-        'profit': profit,
-        'bankroll': bankroll
-    })
-
-records_df = pd.DataFrame(records)
-
 # --- Overall KPIs ---
 st.subheader('Overall financial KPIs')
-final_bankroll = records_df['bankroll'].iloc[-1]
-total_profit = final_bankroll - STARTING_BANKROLL
-total_staked = records_df['stake'].sum()
-roi = (total_profit / total_staked) * 100
-win_rate = records_df['won'].mean() * 100
 
-# Sharpe ratio — mean profit per bet / std profit per bet
-mean_profit = records_df['profit'].mean()
-std_profit = records_df['profit'].std()
+final_bankroll = bets['bankroll'].iloc[-1]
+total_profit = final_bankroll - STARTING_BANKROLL
+total_staked = bets['stake'].sum()
+roi = (total_profit / total_staked) * 100 if total_staked > 0 else 0
+win_rate = bets['won'].mean() * 100
+
+mean_profit = bets['profit'].mean()
+std_profit = bets['profit'].std()
 sharpe = mean_profit / std_profit if std_profit != 0 else 0
 
-# Max drawdown
 peak = STARTING_BANKROLL
 max_drawdown = 0
-for b in records_df['bankroll']:
+for b in bets['bankroll']:
     if b > peak:
         peak = b
     drawdown = (peak - b) / peak
@@ -104,33 +62,27 @@ st.divider()
 st.subheader('Per season breakdown')
 
 season_stats = []
-for season, group in records_df.groupby('season'):
+for season, group in bets.groupby('season_name'):
     s_profit = group['profit'].sum()
     s_staked = group['stake'].sum()
     s_roi = (s_profit / s_staked) * 100 if s_staked > 0 else 0
-    s_win_rate = group['won'].mean() * 100
-    s_bets = len(group)
-    s_won = group['won'].sum()
-    s_lost = s_bets - s_won
-    home_bets = (group['bet'] == 'home_win').sum()
-    away_bets = (group['bet'] == 'away_win').sum()
     season_stats.append({
         'season': season,
-        'bets': s_bets,
-        'won': s_won,
-        'lost': s_lost,
-        'win rate (%)': round(s_win_rate, 1),
+        'bets': len(group),
+        'won': group['won'].sum(),
+        'lost': (~group['won']).sum(),
+        'win rate (%)': round(group['won'].mean() * 100, 1),
         'staked (€)': round(s_staked, 2),
         'profit (€)': round(s_profit, 2),
         'ROI (%)': round(s_roi, 1),
-        'home bets': home_bets,
-        'away bets': away_bets
+        'home bets': (group['bet_outcome'] == 'home_win').sum(),
+        'away bets': (group['bet_outcome'] == 'away_win').sum(),
     })
 
 season_df = pd.DataFrame(season_stats)
 
 def colour_profit(val):
-    if isinstance(val, float) or isinstance(val, int):
+    if isinstance(val, (float, int)):
         return 'color: green' if val > 0 else 'color: red'
     return ''
 
@@ -139,7 +91,6 @@ st.dataframe(
     use_container_width=True
 )
 
-# Profit per season bar chart
 fig = px.bar(season_df, x='season', y='profit (€)', color='profit (€)',
              color_continuous_scale=['red', 'green'],
              title='Profit per season')
@@ -152,12 +103,11 @@ st.divider()
 st.subheader('Risk metrics')
 
 col1, col2, col3 = st.columns(3)
-col1.metric('Avg bet size', f'€{records_df["stake"].mean():.2f}')
-col2.metric('Largest bet', f'€{records_df["stake"].max():.2f}')
-col3.metric('Smallest bet', f'€{records_df["stake"].min():.2f}')
+col1.metric('Avg bet size', f'€{bets["stake"].mean():.2f}')
+col2.metric('Largest bet', f'€{bets["stake"].max():.2f}')
+col3.metric('Smallest bet', f'€{bets["stake"].min():.2f}')
 
-# Winning and losing streaks
-streaks = records_df['won'].tolist()
+streaks = bets['won'].tolist()
 best_streak = worst_streak = cur_win = cur_lose = 0
 for w in streaks:
     if w:
@@ -169,17 +119,16 @@ for w in streaks:
     best_streak = max(best_streak, cur_win)
     worst_streak = max(worst_streak, cur_lose)
 
-largest_win = records_df[records_df['profit'] > 0]['profit'].max()
-largest_loss = records_df[records_df['profit'] < 0]['profit'].min()
+wins = bets[bets['profit'] > 0]['profit']
+losses = bets[bets['profit'] < 0]['profit']
 
 col4, col5, col6, col7 = st.columns(4)
 col4.metric('Best winning streak', best_streak)
 col5.metric('Worst losing streak', worst_streak)
-col6.metric('Largest win', f'€{largest_win:.2f}')
-col7.metric('Largest loss', f'€{largest_loss:.2f}')
+col6.metric('Largest win', f'€{wins.max():.2f}' if not wins.empty else 'N/A')
+col7.metric('Largest loss', f'€{losses.min():.2f}' if not losses.empty else 'N/A')
 
-# Bet breakdown pie chart
-bet_counts = records_df['bet'].value_counts().reset_index()
+bet_counts = bets['bet_outcome'].value_counts().reset_index()
 bet_counts.columns = ['outcome', 'count']
-fig2 = px.pie(bet_counts, names='outcome', values='count', title='Bet breakdown by outcome')
+fig2 = px.pie(bet_counts, names='outcome', values='count', title='Bet breakdown by direction')
 st.plotly_chart(fig2, use_container_width=True)

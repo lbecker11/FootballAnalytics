@@ -1,86 +1,82 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 import numpy as np
 
 st.set_page_config(page_title='Profitability Analysis', layout='wide')
 st.title('Profitability Analysis')
 st.markdown('Expected vs actual profit, and forward projection for next N bets.')
 
-if 'predictions_df' not in st.session_state:
+if 'records' not in st.session_state:
     st.warning('Please navigate to the home page first to load the data.')
     st.stop()
 
-predictions_df = st.session_state['predictions_df']
+records = st.session_state['records']
 
 STARTING_BANKROLL = 10000
+colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+model_colors = dict(zip(records.keys(), colors))
 
-model = st.selectbox('Model', ['XGBoost', 'Dixon-Coles'])
+overlay = st.checkbox('Overlay all models')
 
-if model == 'XGBoost':
-    bets = predictions_df[predictions_df['bet_flag'] == 1].copy()
-    bets = bets[bets['team_id'] == bets['home_team_id']].copy()
-    bet_outcome_col = 'bet_outcome'
-    kelly_h_col = 'kelly_h'
-    kelly_a_col = 'kelly_a'
-    ev_h_col = 'ev_h'
-    ev_a_col = 'ev_a'
-else:
-    bets = predictions_df[predictions_df['dc_bet_flag'] == 1].copy()
-    bets = bets[bets['team_id'] == bets['home_team_id']].copy()
-    bet_outcome_col = 'dc_bet_outcome'
-    kelly_h_col = 'dc_kelly_h'
-    kelly_a_col = 'dc_kelly_a'
-    ev_h_col = 'dc_ev_h'
-    ev_a_col = 'dc_ev_a'
+if overlay:
+    # --- Overlay cumulative actual profit for all models ---
+    st.subheader('Cumulative actual profit — all models')
 
-bets = bets.sort_values(['season_name', 'matchday']).reset_index(drop=True)
+    fig = go.Figure()
+    for name, rdf in records.items():
+        if rdf.empty:
+            continue
+        cumulative = rdf['profit'].cumsum().reset_index(drop=True)
+        fig.add_trace(go.Scatter(
+            x=list(range(1, len(cumulative) + 1)),
+            y=cumulative.values,
+            name=name,
+            line=dict(color=model_colors[name])
+        ))
+    fig.add_hline(y=0, line_dash='dot', line_color='grey', annotation_text='Break even')
+    fig.update_layout(xaxis_title='Bet number', yaxis_title='Cumulative profit (€)',
+                      title='All models — cumulative actual profit')
+    st.plotly_chart(fig, use_container_width=True)
 
-# Reconstruct per-bet profit
-bankroll = STARTING_BANKROLL
-records = []
+    # Summary table
+    summary_rows = []
+    for name, rdf in records.items():
+        if rdf.empty:
+            continue
+        summary_rows.append({
+            'model': name,
+            'bets': len(rdf),
+            'won': rdf['won'].sum(),
+            'win rate (%)': round(rdf['won'].mean() * 100, 1),
+            'total profit (€)': round(rdf['profit'].sum(), 2),
+            'avg profit/bet (€)': round(rdf['profit'].mean(), 2),
+            'final bankroll (€)': round(rdf['bankroll'].iloc[-1], 2),
+        })
+    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+    st.stop()
 
-for _, row in bets.iterrows():
-    outcome = row[bet_outcome_col]
-    if outcome == 'home_win':
-        stake = bankroll * row[kelly_h_col]
-        odds = row['PSH']
-        ev = row[ev_h_col]
-        won = row['outcome'] == 'home_win'
-    else:
-        stake = bankroll * row[kelly_a_col]
-        odds = row['PSA']
-        ev = row[ev_a_col]
-        won = row['outcome'] == 'away_win'
+# --- Single model view ---
+model = st.selectbox('Model', list(records.keys()))
+records_df = records[model].copy()
 
-    expected_profit = ev * stake
-    actual_profit = stake * (odds - 1) if won else -stake
-    bankroll += actual_profit
+if records_df.empty:
+    st.warning(f'No bets flagged for {model}.')
+    st.stop()
 
-    records.append({
-        'season': row['season_name'],
-        'stake': stake,
-        'ev': ev,
-        'expected_profit': expected_profit,
-        'actual_profit': actual_profit,
-        'won': won
-    })
-
-records_df = pd.DataFrame(records)
+records_df['bet_number'] = range(1, len(records_df) + 1)
+records_df['expected_profit'] = records_df['ev'] * records_df['stake']
+records_df['cumulative_expected'] = records_df['expected_profit'].cumsum()
+records_df['cumulative_actual'] = records_df['profit'].cumsum()
 
 # --- Expected vs actual profit ---
 st.subheader('Expected vs actual profit per bet')
-
-records_df['bet_number'] = range(1, len(records_df) + 1)
-records_df['cumulative_expected'] = records_df['expected_profit'].cumsum()
-records_df['cumulative_actual'] = records_df['actual_profit'].cumsum()
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=records_df['bet_number'], y=records_df['cumulative_expected'],
                          name='Expected profit', line=dict(color='blue', dash='dash')))
 fig.add_trace(go.Scatter(x=records_df['bet_number'], y=records_df['cumulative_actual'],
-                         name='Actual profit', line=dict(color='green')))
+                         name='Actual profit', line=dict(color=model_colors[model])))
 fig.add_hline(y=0, line_dash='dot', line_color='grey')
 fig.update_layout(xaxis_title='Bet number', yaxis_title='Cumulative profit (€)',
                   title='Cumulative expected vs actual profit')
@@ -91,8 +87,8 @@ st.subheader('Per bet statistics')
 
 col1, col2, col3 = st.columns(3)
 col1.metric('Avg expected profit per bet', f'€{records_df["expected_profit"].mean():.2f}')
-col2.metric('Avg actual profit per bet', f'€{records_df["actual_profit"].mean():.2f}')
-col3.metric('Std dev profit per bet', f'€{records_df["actual_profit"].std():.2f}')
+col2.metric('Avg actual profit per bet', f'€{records_df["profit"].mean():.2f}')
+col3.metric('Std dev profit per bet', f'€{records_df["profit"].std():.2f}')
 
 st.divider()
 
@@ -102,10 +98,9 @@ st.subheader('Forward projection')
 n_bets = st.slider('Number of future bets to simulate', min_value=10, max_value=500, value=100, step=10)
 n_simulations = 1000
 
-mean_profit = records_df['actual_profit'].mean()
-std_profit = records_df['actual_profit'].std()
+mean_profit = records_df['profit'].mean()
+std_profit = records_df['profit'].std()
 
-# Monte Carlo simulation
 np.random.seed(42)
 simulations = np.random.normal(mean_profit, std_profit, size=(n_simulations, n_bets)).cumsum(axis=1)
 
@@ -122,13 +117,12 @@ fig2.add_trace(go.Scatter(x=x + x[::-1],
                           line=dict(color='rgba(255,255,255,0)'),
                           name='95% confidence interval'))
 fig2.add_trace(go.Scatter(x=x, y=mean_path, name='Expected path',
-                          line=dict(color='blue')))
+                          line=dict(color=model_colors[model])))
 fig2.add_hline(y=0, line_dash='dash', line_color='grey', annotation_text='Break even')
 fig2.update_layout(xaxis_title='Future bet number', yaxis_title='Projected cumulative profit (€)',
                    title=f'Forward projection — next {n_bets} bets ({n_simulations} simulations)')
 st.plotly_chart(fig2, use_container_width=True)
 
-# Summary stats
 prob_profit = (simulations[:, -1] > 0).mean() * 100
 col1, col2, col3 = st.columns(3)
 col1.metric('Expected total profit', f'€{mean_path[-1]:.2f}')
