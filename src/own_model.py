@@ -11,6 +11,7 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.utils.class_weight import compute_sample_weight
 from sklearn.ensemble import StackingClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn.isotonic import IsotonicRegression
 import shap
 
 # Var declaration
@@ -68,7 +69,13 @@ def encode_dependents(train_y, validate_y, test_y):
     test_y_encoded = le.transform(test_y)
     return train_y_encoded, validate_y_encoded, test_y_encoded, le
 
-def train_model(train_x_scaled, train_y_encoded, validate_x_scaled, validate_y_encoded, test_x_scaled, best_params):
+def calibrated_predict(clf, calibrators, x_scaled):
+    raw = clf.predict_proba(x_scaled)
+    cal = np.column_stack([c.predict(raw[:, i]) for i, c in enumerate(calibrators)])
+    cal = cal / cal.sum(axis=1, keepdims=True)  # renormalise so probs sum to 1
+    return cal
+
+def train_model(train_x_scaled, train_y_encoded, validate_x_scaled, validate_y_encoded, test_x_scaled, best_params, le_classes):
     clf_xgb = XGBClassifier(
         objective='multi:softprob',
         early_stopping_rounds=10,
@@ -82,8 +89,18 @@ def train_model(train_x_scaled, train_y_encoded, validate_x_scaled, validate_y_e
         verbose=True,
         eval_set=[(validate_x_scaled, validate_y_encoded)]
     )
-    preds = clf_xgb.predict(test_x_scaled)
-    return clf_xgb, preds
+    # Fit one isotonic regressor per class on the validation set
+    # Each maps raw XGBoost probability → observed frequency for that class
+    val_probs = clf_xgb.predict_proba(validate_x_scaled)
+    calibrators = []
+    for i in range(len(le_classes)):
+        ir = IsotonicRegression(out_of_bounds='clip')
+        ir.fit(val_probs[:, i], (validate_y_encoded == i).astype(int))
+        calibrators.append(ir)
+
+    cal_probs = calibrated_predict(clf_xgb, calibrators, test_x_scaled)
+    preds = cal_probs.argmax(axis=1)  # class label from calibrated probs
+    return clf_xgb, calibrators, preds
 
 def eval_model(le, preds, test_y_encoded):
     print(classification_report(test_y_encoded, preds, target_names=le.classes_))
@@ -185,9 +202,10 @@ def plot_roc_comparison(le, test_y_enc, model_probs_dict):
     plt.savefig('../visualisations/roc_comparison.png')
     plt.show()
 
-def save_model_plus_params(clf_xgb, test_x, test_x_scaled, preds, test_y_enc, le):
+def save_model_plus_params(clf_xgb, calibrators, test_x, test_x_scaled, preds, test_y_enc, le):
     clf_xgb.save_model('../models/xgb_model.json')
-    probs = clf_xgb.predict_proba(test_x_scaled)
+    # Use calibrated probabilities for predictions — raw XGBoost saved separately for SHAP
+    probs = calibrated_predict(clf_xgb, calibrators, test_x_scaled)
     test_preds_df = test_x.copy()
     test_preds_df['pred_away_win'] = probs[:, 0]
     test_preds_df['pred_draw'] = probs[:, 1]
@@ -236,9 +254,9 @@ if __name__ == '__main__':
     train_y_enc, validate_y_enc, test_y_enc, le = encode_dependents(train_y, validate_y, test_y)
     X_search, y_search = prep_for_cv(train_x_scaled, validate_x_scaled, train_y_enc, validate_y_enc)
     best_params = optimal_params(X_search, y_search, param_grid)
-    clf_xgb, preds = train_model(train_x_scaled, train_y_enc, validate_x_scaled, validate_y_enc, test_x_scaled, best_params)
+    clf_xgb, calibrators, preds = train_model(train_x_scaled, train_y_enc, validate_x_scaled, validate_y_enc, test_x_scaled, best_params, le.classes_)
     eval_model(le, preds, test_y_enc)
-    save_model_plus_params(clf_xgb, test_x, test_x_scaled, preds, test_y_enc, le)
+    save_model_plus_params(clf_xgb, calibrators, test_x, test_x_scaled, preds, test_y_enc, le)
 
     # Stacking model — combines XGBoost features with Dixon-Coles probabilities
     train_dc, validate_dc, test_dc = get_dc_features(df, ['2024-2025', '2025-2026'])
@@ -252,7 +270,7 @@ if __name__ == '__main__':
     test_full = df[df['season_name'] == '2025-2026']
     home_mask = (test_full['team_id'] == test_full['home_team_id']).values
 
-    xgb_probs = clf_xgb.predict_proba(test_x_scaled)
+    xgb_probs = calibrated_predict(clf_xgb, calibrators, test_x_scaled)
     stack_probs = stack.predict_proba(test_x_stack)
 
     # Load Dixon-Coles probabilities from saved predictions
