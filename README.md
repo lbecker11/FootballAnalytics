@@ -95,25 +95,26 @@ Extends the standard Poisson model by modelling home and away goals as correlate
 
 A Logistic Regression meta-learner (softmax) trained on the probability outputs of all four models above. The meta-learner learns optimal weights for combining model outputs, with rolling window training to prevent leakage between seasons.
 
-For each outcome class $k \in {\text{home win, draw, away win}}$:
+For each outcome class k in {home win, draw, away win}, the predicted probability is:
 
-  $$P(y = k \mid \mathbf{x}) = \frac{e^{z_k}}{\sum_{j} e^{z_j}}$$
+```
+P(y = k) = exp(z_k) / (exp(z_home) + exp(z_draw) + exp(z_away))
+```
 
-  Where $z_k$ is the linear combination for class $k$:
+Where z_k is the linear combination for class k:
 
-  $$z_k = \beta_{k,0} + \beta_{k,1}p^{DC}{h} + \beta{k,2}p^{DC}{d} + \beta{k,3}p^{DC}{a} + \beta{k,4}p^{XGB}{h} +
-  \beta{k,5}p^{XGB}{d} + \beta{k,6}p^{XGB}{a} + \beta{k,7}p^{xG}{h} + \beta{k,8}p^{xG}{d} + \beta{k,9}p^{xG}{a} +
-  \beta{k,10}p^{BP}{h} + \beta{k,11}p^{BP}{d} + \beta{k,12}p^{BP}_{a}$$
+```
+z_k = b0 + w1*p_DC_home  + w2*p_DC_draw  + w3*p_DC_away
+         + w4*p_XGB_home  + w5*p_XGB_draw + w6*p_XGB_away
+         + w7*p_xG_home   + w8*p_xG_draw  + w9*p_xG_away
+         + w10*p_BP_home  + w11*p_BP_draw + w12*p_BP_away
+```
 
-  Where:
-  - $\beta_{k,0}$ is the intercept for class $k$
-  - $p^{DC}{h}, p^{DC}{d}, p^{DC}_{a}$ are the Dixon-Coles probabilities
-  - $p^{XGB}{h}, p^{XGB}{d}, p^{XGB}_{a}$ are the XGBoost Classifier probabilities
-  - $p^{xG}{h}, p^{xG}{d}, p^{xG}_{a}$ are the XGBoost xG probabilities
-  - $p^{BP}{h}, p^{BP}{d}, p^{BP}_{a}$ are the Bivariate Poisson probabilities
-  - The softmax in the first equation converts the raw scores $z_k$ into a valid probability distribution that sums to 1
+- b0 is the intercept for class k
+- w1–w12 are the learned weights for each model's home, draw and away probability
+- The softmax converts the raw scores into a probability distribution that sums to 1
 
-  So there are 3 classes × 13 parameters (1 intercept + 12 weights) = 39 learnable parameters in total.
+There are 3 classes × 13 parameters (1 intercept + 12 weights) = 39 learnable parameters in total.
 
 #### Bayesian Network (Explored, Not Used)
 
@@ -201,17 +202,16 @@ In order to have predicted outcomes for my data, so that the betting backtest co
 
 ### The Draw Problem and Threshold Optimisation
 Draws are the hardest outcome to predict — they are the least frequent and the least distinguishable from close home or away wins in feature space. The initial models had near-zero draw recall, classifying almost everything as home or away win. The solution was a draw threshold: if the predicted draw probability exceeds a threshold, classify as draw. The threshold was found by searching 50 candidate values between 0.25 and 0.40, subject to minimum draw recall (20%) and minimum overall model accuracy (47%) constraints — a constrained optimisation over a discrete grid.
-$$\hat{y} = \begin{cases} \text{draw} & \text{if } p_d > \tau \ \arg\max(p_h, p_d, p_a) & \text{otherwise}
-  \end{cases}$$
+```
+predicted = draw              if p_draw > threshold
+predicted = argmax(p_h, p_d, p_a)   otherwise
 
-  Subject to:
+subject to:
+  accuracy  >= 0.47
+  draw recall >= 0.20
+```
 
-  $$\text{accuracy}(\hat{y}) \geq 0.47 \quad \text{and} \quad \text{recall}_{\text{draw}}(\hat{y}) \geq 0.20$$
-
-  Where:
-  - $p_h, p_d, p_a$ are the model's predicted probabilities for home win, draw, away win
-  - $\tau$ is the threshold being searched over $[0.25, 0.40]$
-  - $\arg\max$ is the standard winner-takes-all prediction when draw is not triggered
+Where threshold is searched over 50 values between 0.25 and 0.40, and argmax is the standard winner-takes-all prediction when draw is not triggered.
 
 ### Accuracy vs. Recall
 Overall accuracy masks imbalanced performance across classes. A model that predicts home win for every match achieves ~45% accuracy in the Bundesliga — without correctly identifying a single draw or away win. Recall per class — the fraction of actual draws, home wins, and away wins correctly identified — is what matters for understanding where the model actually works. The two metrics need to be read together: accuracy tells you how often you are right overall, recall tells you which outcomes you are actually capturing. This was essential since our main test was testing it with a simulated bankroll. Thats why we used recall as constraint in the draw problem optimisation. 
