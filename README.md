@@ -52,7 +52,7 @@ Match statistics were scraped for five Bundesliga seasons (2020–2026), coverin
 
 ### Feature Engineering
 
-Features were built with strict time-awareness to prevent data leakage — every feature at match time uses only information available before kick-off:
+Features were built with strict time-awareness to prevent data leakage. Every feature at match time uses only information available before kick-off:
 
 - **Previous match stats**: xG, shots, possession, accuracy from the prior game
 - **Rolling averages**: goals, xG performance, shot conversion over recent matches
@@ -176,10 +176,10 @@ However, the stacked model performed the "best" by losing 42.8% of the bankroll.
 The stats site rendered its content dynamically via JavaScript, meaning a standard `requests` call returned an empty page. Selenium was needed to drive a real browser, wait for elements to load, and interact with dropdown menus to navigate between seasons and matchdays. The outline of the pages was always the same, which made it slightly easier. However, some rows were still misssed, but at such little quantity that it made no real impact on the model. 
 
 ### Data Wrangling
-Standard pandas work — handling missing values, reshaping between wide and long format, merging tables on keys. Nothing exotic but essential groundwork before anything else could be built.
+Standard pandas work. Handling missing values, reshaping between wide and long format, merging tables on keys. Nothing exotic but essential groundwork before anything else could be built.
 
 ### ELO Ratings
-The ELO formula — adapted from chess — rates team strength dynamically based on results. The core formula:
+The ELO formula. Adapted from chess, rates team strength dynamically based on results. The core formula:
 
 ```
 Expected = 1 / (1 + 10^((opponent_elo - team_elo) / 400))
@@ -189,19 +189,19 @@ New rating = Old rating + K × (Actual − Expected)
 Where `Actual` is 1 for a win, 0.5 for a draw, 0 for a loss. `K` controls how quickly ratings update — K=40 for newly promoted teams and K=24 for established ones, since new teams have more uncertain ratings that should move faster. I saw this approach in another video about trying to systematically model tennis. This was a good choice as it was leading the SHAP values. 
 
 ### Putting a Research Paper into Practice
-The Dixon-Coles model (Dixon & Coles, 1997) was the first time reading an academic paper and implementing it from scratch. The key insight was that standard Poisson models underestimate draws because goals aren't truly independent — the 0-0 and 1-1 scorelines are more common than Poisson predicts. Dixon and Coles introduced a correction factor ρ for these low-scoring outcomes that gets estimated from the data.
+The Dixon-Coles model (Dixon & Coles, 1997) was the first time reading an academic paper and implementing it from scratch. The key insight was that standard Poisson models underestimate draws because goals aren't truly independent, the 0-0 and 1-1 scorelines are more common than Poisson predicts. Dixon and Coles introduced a correction factor ρ for these low-scoring outcomes that gets estimated from the data.
 
 ### Data Leakage
-Mid-project it became clear that several features included stats from the current match — goals scored, shots taken, possession — which would be unknown at prediction time. A model trained on these features learns to fit the result rather than predict it, producing inflated accuracy on training data that collapses on unseen matches. Fixing this meant rebuilding all features to use only prior-match data (`prev_xgoals`, `rolling_avg_goals`, etc.).
+Mid-project it became clear that several features included stats from the current match (goals scored, shots taken, possession) which would be unknown at prediction time. A model trained on these features learns to fit the result rather than predict it, producing inflated accuracy on training data that collapses on unseen matches. Fixing this meant rebuilding all features to use only prior-match data (`prev_xgoals`, `rolling_avg_goals`, etc.).
 
 ### Probability Calibration — Isotonic Regression
-XGBoost's raw probability outputs tend to be overconfident — pushing predictions toward 0 and 1 rather than reflecting true frequencies. `CalibratedClassifierCV` was explored first but removed in a newer sklearn version. The solution was fitting one `IsotonicRegression` per class on a held-out validation season, mapping raw scores to calibrated probabilities. Isotonic regression is non-parametric — it fits a monotone step function to the data rather than assuming a shape, making it well-suited to fixing arbitrary distortions in the raw outputs.
+XGBoost's raw probability outputs tend to be overconfident, pushing predictions toward 0 and 1 rather than reflecting true frequencies. `CalibratedClassifierCV` was explored first but removed in a newer sklearn version. The solution was fitting one `IsotonicRegression` per class on a held-out validation season, mapping raw scores to calibrated probabilities. Isotonic regression is non-parametric, it fits a monotone step function to the data rather than assuming a shape, making it well-suited to fixing arbitrary distortions in the raw outputs.
 
 ### Rolling window training
 In order to have predicted outcomes for my data, so that the betting backtest could be created a new training approach was needed. Because XGBoost needed a validation set, it could not predict on that validation season. The idea was then to start with the 2020-2021 season, train on it and predict the 2021-2022 season. For the next iteration the trainining season was 2020-2021 again, we now have 2021-2022 as the validation and set and predict on 2022-2023. Then it would be 2020-2022 as training set, 2022-2023 as validation and then predict 2024-2025. This loop was done for all seasons. This way we had valid prediction data without any look ahead bias.  
 
 ### The Draw Problem and Threshold Optimisation
-Draws are the hardest outcome to predict — they are the least frequent and the least distinguishable from close home or away wins in feature space. The initial models had near-zero draw recall, classifying almost everything as home or away win. The solution was a draw threshold: if the predicted draw probability exceeds a threshold, classify as draw. The threshold was found by searching 50 candidate values between 0.25 and 0.40, subject to minimum draw recall (20%) and minimum overall model accuracy (47%) constraints — a constrained optimisation over a discrete grid.
+Draws are the hardest outcome to predict, they are the least frequent and the least distinguishable from close home or away wins in feature space. The initial models had near-zero draw recall, classifying almost everything as home or away win. The solution was a draw threshold: if the predicted draw probability exceeds a threshold, classify as draw. The threshold was found by searching 50 candidate values between 0.25 and 0.40, subject to minimum draw recall (20%) and minimum overall model accuracy (47%) constraints — a constrained optimisation over a discrete grid.
 ```
 predicted = draw              if p_draw > threshold
 predicted = argmax(p_h, p_d, p_a)   otherwise
@@ -225,9 +225,9 @@ To get fair probabilities you remove the vig by normalising:
 fair_home = (1/odds_home) / ((1/odds_home) + (1/odds_draw) + (1/odds_away))
 ```
 
-This converts raw odds into a proper probability distribution that sums to 1. Pinnacle was used specifically because their margin is ~2% — the lowest in the industry — making their fair probabilities as close to the true market consensus as publicly available data allows.
+This converts raw odds into a proper probability distribution that sums to 1. Pinnacle was used specifically because their margin is ~2% (the lowest in the industry) making their fair probabilities as close to the true market consensus as publicly available data allows.
 
-This same logic applies anywhere odds exist. In poker, pot odds work identically — if you need to call €10 into a €30 pot you are getting 3:1, implying you need to win 25% of the time to break even. Converting between odds and probabilities is a transferable skill across any domain with uncertain outcomes.
+This same logic applies anywhere odds exist. In poker, pot odds work identically. If you need to call €10 into a €30 pot you are getting 3:1, implying you need to win 25% of the time to break even. Converting between odds and probabilities is a transferable skill across any domain with uncertain outcomes.
 
 ### Edge and Expected Value
 Edge is the gap between what the model thinks the probability is and what the market implies:
@@ -242,7 +242,7 @@ A positive edge means the model believes the outcome is more likely than the mar
 EV = p × (odds − 1) − (1 − p)
 ```
 
-A positive EV bet is one where, averaged over many repetitions, you come out ahead. A single positive EV bet can still lose — EV is a long-run concept. We filtered bets to EV > 0.20 to require a meaningful edge rather than betting on marginal situations.
+A positive EV bet is one where, averaged over many repetitions, you come out ahead. A single positive EV bet can still lose, EV is a long-run concept. We filtered bets to EV > 0.20 to require a meaningful edge rather than betting on marginal situations.
 
 ### Kelly Criterion
 Kelly answers the question of how much to stake given a positive EV bet:
@@ -251,7 +251,7 @@ Kelly answers the question of how much to stake given a positive EV bet:
 f = (b × p − (1 − p)) / b
 ```
 
-Where `b` is the decimal odds minus 1 and `p` is the model's probability. Full Kelly maximises long-run bankroll growth but produces very large stakes and high variance. Fractional Kelly (25% of the full Kelly stake) capped at 10% of bankroll per bet was used — a standard practitioner adjustment that sacrifices some expected growth in exchange for significantly smoother bankroll development and protection against model error. Kelly inherently scales stakes with confidence — a high-edge bet gets a larger stake automatically, without any manual judgement.
+Where `b` is the decimal odds minus 1 and `p` is the model's probability. Full Kelly maximises long-run bankroll growth but produces very large stakes and high variance. Fractional Kelly (25% of the full Kelly stake) capped at 10% of bankroll per bet was used, a standard practitioner adjustment that sacrifices some expected growth in exchange for significantly smoother bankroll development and protection against model error. Kelly inherently scales stakes with confidence, a high-edge bet gets a larger stake automatically, without any manual judgement.
 
 The broader insight connecting prediction and betting: a model that is right 48% of the time can still have positive EV if it is right on outcomes the market underprices. Prediction accuracy and betting profitability are related but not the same thing. This same logic can be applied to deep value investing. As long as the winners are high enough they can cover the losers plus profit. 
 
